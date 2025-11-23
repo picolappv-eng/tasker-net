@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="ca">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hike & Fly Tasker QR</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; text-align: center; background-color: #f4f4f9; }
+        .container { max-width: 600px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #e63946; }
+        input[type="file"] { margin: 20px 0; padding: 10px; border: 2px dashed #ccc; width: 90%; }
+        button { background-color: #2a9d8f; color: white; border: none; padding: 15px 30px; font-size: 16px; border-radius: 5px; cursor: pointer; margin-top: 10px;}
+        button:disabled { background-color: #ccc; }
+        #status { margin-top: 20px; color: #333; font-weight: bold; white-space: pre-wrap; text-align: left;}
+        .error { color: red; }
+        .success { color: green; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>🏔 Hike & Fly QR Tasker</h1>
+    <p>Puja la foto del QR. Format XCTSK/H&F compatible.</p>
+    
+    <input type="file" id="file-input" accept="image/*">
+    <br>
+    <canvas id="qr-canvas" hidden></canvas>
+    <div id="status">Esperant imatge...</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+
+<script>
+    const fileInput = document.getElementById('file-input');
+    const statusDiv = document.getElementById('status');
+    const canvas = document.getElementById('qr-canvas');
+    const ctx = canvas.getContext('2d');
+
+    fileInput.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        statusDiv.innerText = "Fitxer seleccionat. Processant..."; 
+        statusDiv.className = "";
+
+        const img = new Image();
+        
+        img.onload = () => {
+            canvas.width = img.width;
+            canvas.height = img.height;
+            ctx.drawImage(img, 0, 0);
+            
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const code = jsQR(imageData.data, imageData.width, imageData.height);
+
+            if (code) {
+                statusDiv.innerText = "QR Detectat. Contingut:\n" + code.data.substring(0, 100) + '...';
+                processarDadesQR(code.data);
+            } else {
+                statusDiv.innerText = "❌ No s'ha trobat cap QR a la imatge. Prova amb una foto més nítida.";
+                statusDiv.className = "error";
+            }
+        };
+
+        img.onerror = () => {
+             statusDiv.innerText = "❌ ERROR: El navegador no pot carregar la imatge. Prova a seleccionar l'arxiu des de la galeria.";
+             statusDiv.className = "error";
+        };
+
+        img.src = URL.createObjectURL(file);
+    });
+
+    // --- FUNCIÓ PER DESXIFRAR COORDENADES XCTSK ---
+    function decodeXCTrackCoord(encoded) {
+        const base = 'A'.charCodeAt(0);
+        const latBase = 'C'.charCodeAt(0);
+        
+        let multiplier = 1e5;
+        let lat = 0;
+        let lon = 0;
+        let p = 0;
+        
+        // Latitud
+        for (let i = 0; i < 6; i++) {
+            lat += (encoded.charCodeAt(p++) - latBase) * multiplier;
+            multiplier /= 10;
+        }
+
+        multiplier = 1e5;
+        // Longitud
+        for (let i = 0; i < 6; i++) {
+            lon += (encoded.charCodeAt(p++) - base) * multiplier;
+            multiplier /= 10;
+        }
+
+        lat = (lat / 10000) - 90;
+        lon = (lon / 10000) - 180;
+        
+        return { lat: lat, lon: lon };
+    }
+
+
+    // --- LÒGICA DE PARSEJAR (Analitzar el text XCTSK) ---
+    function processarDadesQR(text) {
+        if (!text.startsWith("XCTSK:")) {
+            statusDiv.innerText += "\n\n⚠ Format no reconegut com XCTSK.";
+            statusDiv.className = "error";
+            return;
+        }
+
+        const jsonString = text.substring(6); 
+        let data;
+        try {
+            data = JSON.parse(jsonString);
+        } catch (e) {
+            statusDiv.innerText += "\n\n❌ Error en parsejar el JSON de la tasca.";
+            statusDiv.className = "error";
+            return;
+        }
+
+        const balises = [];
+        
+        data.t.forEach((tp, index) => {
+            const coords = decodeXCTrackCoord(tp.z);
+            
+            // Radi: XCTrack no sempre especifica el radi al camp 'r', usem 400m per defecte si no existeix.
+            const radiMetres = tp.r ? tp.r : 400; 
+
+            let tipus = "WPT";
+            if (tp.t === 1) tipus = "START";
+            if (tp.t === 3) tipus = "FINISH";
+
+            balises.push({
+                nom: ${tipus} ${index + 1} (${tp.n || 'TP'}), 
+                lat: coords.lat,
+                lon: coords.lon,
+                radi: radiMetres
+            });
+        });
+
+        if (balises.length > 0) {
+            generarKML(balises);
+            statusDiv.innerText += "\n\n✅ Fitxer KML generat correctament amb " + balises.length + " balises! Obre l'arxiu descarregat amb Mapy.cz";
+            statusDiv.className = "success";
+        } else {
+            statusDiv.innerText += "\n\n⚠ No s'han trobat balises a la tasca.";
+            statusDiv.className = "error";
+        }
+    }
+    
+    // --- LÒGICA MATEMÀTICA I GENERACIÓ KML (sense canvis) ---
+    function getCoordinatesCircle(lat, lon, radiusMeters) {
+        let coords = "";
+        const R = 6378137; 
+        const steps = 36; 
+
+        for (let i = 0; i <= steps; i++) {
+            const angle = (i * 360 / steps) * (Math.PI / 180);
+            const latRad = lat * (Math.PI / 180);
+            const lonRad = lon * (Math.PI / 180);
+
+            const d = radiusMeters;
+            
+            const newLat = Math.asin(Math.sin(latRad) * Math.cos(d / R) + 
+                           Math.cos(latRad) * Math.sin(d / R) * Math.cos(angle));
+            
+            const newLon = lonRad + Math.atan2(Math.sin(angle) * Math.sin(d / R) * Math.cos(latRad), 
+                           Math.cos(d / R) - Math.sin(latRad) * Math.sin(newLat));
+
+            const pLat = newLat * (180 / Math.PI);
+            const pLon = newLon * (180 / Math.PI);
+
+            coords += `${pLon},${pLat},0 `;
+        }
+        return coords;
+    }
+
+    function generarKML(balises) {
+        let kml = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Tasca H&F XCTSK</name>
+    <Style id="startStyle"><LineStyle><color>ff00ff00</color><width>3</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>
+    <Style id="finishStyle"><LineStyle><color>ff1478ff</color><width>3</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>
+    <Style id="turnpointStyle"><LineStyle><color>ff0000ff</color><width>3</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>`;
+
+        balises.forEach(b => {
+            let styleId = "turnpointStyle";
+            if (b.nom.includes("START")) styleId = "startStyle";
+            if (b.nom.includes("FINISH")) styleId = "finishStyle";
+            
+            kml += `
+    <Placemark>
+      <name>Cilindre ${b.nom} (${b.radi}m)</name>
+      <styleUrl>#${styleId}</styleUrl>
+      <LineString>
+        <coordinates>${getCoordinatesCircle(b.lat, b.lon, b.radi)}</coordinates>
+      </LineString>
+    </Placemark>`;
+            
+            kml += `
+    <Placemark>
+      <name>${b.nom}</name>
+      <Point><coordinates>${b.lon},${b.lat},0</coordinates></Point>
+    </Placemark>`;
+        });
+
+        kml += `
+  </Document>
+</kml>`;
+
+        const blob = new Blob([kml], { type: 'application/vnd.google-earth.kml+xml' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = 'Tasca_HikeFly_XCTrack.kml';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    }
+</script>
+
+</body>
+</html>
